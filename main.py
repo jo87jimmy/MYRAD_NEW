@@ -1,188 +1,254 @@
-import torch  # 引入 PyTorch
-from torchvision.datasets import ImageFolder  # 用於影像資料夾的資料集
-import numpy as np  # 數值計算套件
-import random  # 亂數控制
-import os  # 檔案系統操作
-from torch.utils.data import DataLoader  # PyTorch 的資料載入器
-import torch.backends.cudnn as cudnn  # CUDA cuDNN 加速
-import argparse  # 命令列參數處理
-from torch.nn import functional as F  # 引入 PyTorch 的函式介面
-
-from torch import optim
-# 新增熱力圖可視化所需的函式庫
-from PIL import Image
-import matplotlib.pyplot as plt
-import torchvision.transforms as transforms
-import cv2  # 匯入 OpenCV，用於影像處理
-
+import os
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch.utils.data import DataLoader
+from torchvision.utils import make_grid, save_image
+from torchvision import transforms as T
+from PIL import Image
+import numpy as np
+from sklearn.metrics import roc_auc_score
 from torch.utils.tensorboard import SummaryWriter
 
-from model_unet import ReconstructiveSubNetwork
-from student_models import StudentReconstructiveSubNetwork
-import torchvision.utils as vutils
+from model_unet import ReconstructiveSubNetwork  # 你的 DRAEM 模型
 
-def setup_seed(seed):
-    # 設定隨機種子，確保實驗可重現
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    np.random.seed(seed)
-    random.seed(seed)
-    torch.backends.cudnn.deterministic = True  # 保證結果可重現
-    torch.backends.cudnn.benchmark = False  # 關閉自動最佳化搜尋
+# =======================
+# Dataset
+# =======================
+class MVTecDataset(torch.utils.data.Dataset):
+    def __init__(self, root, category="bottle", split="train", resize=256):
+        self.root = root
+        self.category = category
+        self.split = split
+        self.img_dir = os.path.join(root, category, split)
+        self.gt_dir = os.path.join(root, category, "ground_truth")
 
-# === 3. 特徵提取 Hook ===
+        self.data, self.labels, self.masks = [], [], []
+
+        for defect_type in sorted(os.listdir(self.img_dir)):
+            img_folder = os.path.join(self.img_dir, defect_type)
+            if not os.path.isdir(img_folder):
+                continue
+            for f in sorted(os.listdir(img_folder)):
+                img_path = os.path.join(img_folder, f)
+                if defect_type == "normal":
+                    self.data.append(img_path)
+                    self.labels.append(0)
+                    self.masks.append(None)
+                else:
+                    mask_path = os.path.join(self.gt_dir, defect_type, f.replace(".png","_mask.png"))
+                    self.data.append(img_path)
+                    self.labels.append(1)
+                    self.masks.append(mask_path)
+
+        self.transform = T.Compose([
+            T.Resize((resize, resize)),
+            T.ToTensor()
+        ])
+        self.mask_transform = T.Compose([
+            T.Resize((resize, resize), interpolation=Image.NEAREST),
+            T.ToTensor()
+        ])
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        img = Image.open(self.data[idx]).convert("RGB")
+        img = self.transform(img)
+        label = self.labels[idx]
+        mask_path = self.masks[idx]
+
+        if mask_path is None:
+            mask = torch.zeros((1, img.shape[1], img.shape[2]))
+        else:
+            mask = Image.open(mask_path).convert("L")
+            mask = self.mask_transform(mask)
+            mask = (mask>0.5).float()
+
+        return img, (torch.tensor(label, dtype=torch.long), mask)
+
+# =======================
+# Utilities
+# =======================
 def get_embeddings(model, x):
-    feats = []
-    hooks = []
-
+    feats, hooks = [], []
     def hook_fn(_, __, output):
         feats.append(output)
-
     for layer in model.modules():
         if isinstance(layer, nn.Conv2d):
             hooks.append(layer.register_forward_hook(hook_fn))
-
     _ = model(x)
-
-    for h in hooks:
-        h.remove()
-
+    for h in hooks: h.remove()
     return feats
-# RD4AD Loss (Cosine Similarity)
-def rd4ad_loss(teacher_feats, student_feats,cos=None):
+
+cos = nn.CosineSimilarity(dim=1)
+def rd4ad_loss(teacher_feats, student_feats):
     loss = 0
-    for t, s in zip(teacher_feats, student_feats):
-        # normalize to unit length
+    for t,s in zip(teacher_feats, student_feats):
         t = nn.functional.normalize(t.flatten(1), dim=1)
         s = nn.functional.normalize(s.flatten(1), dim=1)
         loss += torch.mean(1 - cos(t, s))
     return loss
 
-def train(_arch_, _class_, epochs, save_pth_path):
-    # 訓練流程主函數
-    print(f"🔧 類別: {_class_} | Epochs: {epochs}")
+def anomaly_map(imgs, teacher_model, student_model):
+    with torch.no_grad():
+        t_feats = get_embeddings(teacher_model, imgs)
+        s_feats = get_embeddings(student_model, imgs)
+    score_maps = []
+    for t,s in zip(t_feats, s_feats):
+        t = nn.functional.normalize(t, dim=1)
+        s = nn.functional.normalize(s, dim=1)
+        diff = 1 - torch.mean(t*s, dim=1, keepdim=True)
+        diff = nn.functional.interpolate(diff, size=imgs.shape[2:], mode="bilinear")
+        score_maps.append(diff)
+    return torch.mean(torch.stack(score_maps), dim=0)
 
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'  # 選擇運算裝置
-    print(f"🖥️ 使用裝置: {device}")
-    # === 1. 載入 Teacher (DRAEM 訓練好的模型) ===
-    # 教師模型 (已載入權重並設為 eval 模式)
-    teacher_model = ReconstructiveSubNetwork(in_channels=3,
-                                             out_channels=3)  # 重建子網路
+# =======================
+# Evaluation
+# =======================
+def evaluate(student_model, teacher_model, val_loader, device, writer=None, epoch=None):
+    student_model.eval()
+    all_pixel_scores, all_pixel_labels = [], []
+    all_img_scores, all_img_labels = [], []
 
-    # === Step 2: 載入 checkpoint ===
-    teacher_model_ckpt = torch.load(
-        "DRAEM_seg_large_ae_large_0.0001_800_bs8_bottle_.pckl",
-        map_location=device,
-        weights_only=True)  # 載入教師重建模型權重
+    with torch.no_grad():
+        for imgs, (img_labels, pixel_masks) in val_loader:
+            imgs, pixel_masks = imgs.to(device), pixel_masks.to(device)
+            anomaly = anomaly_map(imgs, teacher_model, student_model)
 
-    teacher_model.load_state_dict(teacher_model_ckpt)  # 將權重加載到模型
+            all_pixel_scores.append(anomaly.cpu().numpy().ravel())
+            all_pixel_labels.append(pixel_masks.cpu().numpy().ravel())
 
-    # 重要：載入權重後再移到設備
-    teacher_model = teacher_model.to(device)
-    teacher_model.eval()  # 設為評估模式，不更新權重
+            img_scores = anomaly.view(anomaly.size(0), -1).max(dim=1)[0]
+            all_img_scores.append(img_scores.cpu().numpy())
+            all_img_labels.append(img_labels.numpy())
+
+        # 可視化前 4 張
+        if writer is not None and epoch is not None:
+            val_imgs_vis, (val_labels_vis, val_masks_vis) = next(iter(val_loader))
+            val_imgs_vis = val_imgs_vis.to(device)
+            anomaly_vis = anomaly_map(val_imgs_vis, teacher_model, student_model)
+            anomaly_norm = (anomaly_vis - anomaly_vis.min()) / (anomaly_vis.max() - anomaly_vis.min() + 1e-8)
+
+            input_grid = make_grid(val_imgs_vis[:4], nrow=4)
+            anomaly_grid = make_grid(anomaly_norm[:4].repeat(1,3,1,1), nrow=4)
+            mask_grid = make_grid(val_masks_vis[:4].repeat(1,3,1,1), nrow=4)
+
+            writer.add_image("Val/Input", input_grid, epoch)
+            writer.add_image("Val/AnomalyMap", anomaly_grid, epoch)
+            writer.add_image("Val/GT_Mask", mask_grid, epoch)
+
+    all_pixel_scores = np.concatenate(all_pixel_scores)
+    all_pixel_labels = np.concatenate(all_pixel_labels)
+    all_img_scores = np.concatenate(all_img_scores)
+    all_img_labels = np.concatenate(all_img_labels)
+
+    pixel_auroc = roc_auc_score(all_pixel_labels, all_pixel_scores)
+    img_auroc = roc_auc_score(all_img_labels, all_img_scores)
+    return pixel_auroc, img_auroc
+
+# =======================
+# Main Pipeline
+# =======================
+def main():
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    # Load datasets
+    train_dataset = MVTecDataset(root="./mvtec_ad", category="bottle", split="train", resize=256)
+    train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True, num_workers=4)
+    val_dataset = MVTecDataset(root="./mvtec_ad", category="bottle", split="test", resize=256)
+    val_loader = DataLoader(val_dataset, batch_size=8, shuffle=False, num_workers=4)
+
+    # Load teacher
+    teacher_ckpt = torch.load("draem_trained.pckl", map_location=device)
+    teacher_model = ReconstructiveSubNetwork(in_channels=3, out_channels=3).to(device)
+    teacher_model.load_state_dict(teacher_ckpt['reconstructive'])
+    teacher_model.eval()
     for p in teacher_model.parameters():
         p.requires_grad = False
 
-    # 學生模型
-    student_dropout_rate = 0.2  # Dropout 率，可調整
-    student_model = StudentReconstructiveSubNetwork(
-        in_channels=3, out_channels=3,
-        dropout_rate=student_dropout_rate)  # 學生重建模型
-
-    # === 4. RD4AD Loss (Cosine Similarity) ===
-    cos = nn.CosineSimilarity(dim=1)
-
-
-    # === 5. Optimizer ===
+    # Student model
+    student_model = ReconstructiveSubNetwork(in_channels=3, out_channels=3).to(device)
     optimizer = optim.Adam(student_model.parameters(), lr=1e-4)
 
-    # === 6. TensorBoard ===
+    # TensorBoard
     writer = SummaryWriter(log_dir="./runs/rd4ad")
-
-    # === 7. 訓練 & 驗證流程 ===
-    def anomaly_map(img):
-        with torch.no_grad():
-            t_feats = get_embeddings(teacher_model, img)
-            s_feats = get_embeddings(student_model, img)
-
-        score_maps = []
-        for t, s in zip(t_feats, s_feats):
-            t = nn.functional.normalize(t, dim=1)
-            s = nn.functional.normalize(s, dim=1)
-            diff = 1 - torch.mean(t * s, dim=1, keepdim=True)  # (B,1,H,W)
-            diff = nn.functional.interpolate(diff, size=img.shape[2:], mode="bilinear")
-            score_maps.append(diff)
-
-        anomaly = torch.mean(torch.stack(score_maps), dim=0)
-        return anomaly
+    checkpoint_dir = "./checkpoints"
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    best_pixel_auroc = 0.0
 
     epochs = 50
     global_step = 0
-
     for epoch in range(epochs):
         student_model.train()
-        for imgs, _ in train_loader:  # train_loader: 只含正常樣本
+        for imgs, _ in train_loader:
             imgs = imgs.to(device)
-
             with torch.no_grad():
                 teacher_feats = get_embeddings(teacher_model, imgs)
-
             student_feats = get_embeddings(student_model, imgs)
-
-            loss = rd4ad_loss(teacher_feats, student_feats, cos)
+            loss = rd4ad_loss(teacher_feats, student_feats)
 
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
 
-            # log to TensorBoard
             writer.add_scalar("Train/Loss", loss.item(), global_step)
             global_step += 1
 
-        print(f"Epoch [{epoch+1}/{epochs}] Loss: {loss.item():.4f}")
+        print(f"Epoch [{epoch+1}/{epochs}] Train Loss: {loss.item():.4f}")
 
-        # === 驗證 ===
-        student_model.eval()
-        with torch.no_grad():
-            val_imgs, _ = next(iter(val_loader))  # val_loader: 含正常+異常
-            val_imgs = val_imgs.to(device)
+        # Validation
+        pixel_auroc, img_auroc = evaluate(student_model, teacher_model, val_loader, device, writer, epoch)
+        writer.add_scalar("Val/Pixel_AUROC", pixel_auroc, epoch)
+        writer.add_scalar("Val/Image_AUROC", img_auroc, epoch)
+        print(f"Validation - Pixel AUROC: {pixel_auroc:.4f}, Image AUROC: {img_auroc:.4f}")
 
-            anomaly = anomaly_map(val_imgs)
-
-            # log 原圖 & anomaly map
-            writer.add_images("Val/Input", val_imgs, epoch)
-            writer.add_images("Val/AnomalyMap", (anomaly - anomaly.min()) / (anomaly.max() - anomaly.min() + 1e-8), epoch)
+        # Save best checkpoint
+        if pixel_auroc > best_pixel_auroc:
+            best_pixel_auroc = pixel_auroc
+            ckpt_path = os.path.join(checkpoint_dir, f"student_best_epoch{epoch+1}_pixelAUROC{pixel_auroc:.4f}.pth")
+            torch.save({
+                "epoch": epoch+1,
+                "pixel_auroc": pixel_auroc,
+                "img_auroc": img_auroc,
+                "student_state_dict": student_model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict()
+            }, ckpt_path)
+            print(f"--> Saved best Student model to {ckpt_path}")
 
     writer.close()
 
+    # --------------------------
+    # Inference + visualization
+    # --------------------------
+    os.makedirs("./inference_results", exist_ok=True)
+    student_model.eval()
+    with torch.no_grad():
+        for i, (imgs, (labels, masks)) in enumerate(val_loader):
+            imgs, masks = imgs.to(device), masks.to(device)
+            anomaly = anomaly_map(imgs, teacher_model, student_model)
+            anomaly_norm = (anomaly - anomaly.min()) / (anomaly.max() - anomaly.min() + 1e-8)
+            anomaly_rgb = anomaly_norm.repeat(1,3,1,1)
+            masks_rgb = masks.repeat(1,3,1,1)
 
-    print("訓練完成！")  # 訓練結束
+            combined = torch.cat([imgs, anomaly_rgb, masks_rgb], dim=3)
+            save_image(combined, f"./inference_results/comparison_batch{i+1}.png")
+            print(f"Saved batch {i+1} comparison to ./inference_results/comparison_batch{i+1}.png")
 
-if __name__ == '__main__':
-    import argparse
-    import pandas as pd
-    import os
-    import torch
+    # --------------------------
+    # Full evaluation report
+    # --------------------------
+    pixel_auroc, img_auroc = evaluate(student_model, teacher_model, val_loader, device)
+    report_path = "./inference_results/rd4ad_evaluation_report.txt"
+    with open(report_path, "w") as f:
+        f.write(f"Pixel-level AUROC: {pixel_auroc:.4f}\n")
+        f.write(f"Image-level AUROC: {img_auroc:.4f}\n")
+    print(f"Evaluation done. Report saved to {report_path}")
+    print(f"Pixel-level AUROC: {pixel_auroc:.4f}, Image-level AUROC: {img_auroc:.4f}")
 
-    # 解析命令列參數
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--category', default='bottle', type=str)  # 訓練類別
-    parser.add_argument('--epochs', default=25, type=int)  # 訓練回合數
-    parser.add_argument('--arch', default='wres50', type=str)  # 模型架構
-    parser.add_argument('--bs', action='store', type=int, required=True)
-    parser.add_argument('--lr', action='store', type=float, required=True)
-
-    args = parser.parse_args()
-
-    setup_seed(111)  # 固定隨機種子
-    save_pth_path = f"pths/best_{args.arch}_{args.category}"
-
-    # 建立輸出資料夾
-    save_pth_dir = save_pth_path if save_pth_path else 'pths/best'
-    os.makedirs(save_pth_dir, exist_ok=True)
-
-    # 開始訓練，並接收最佳模型路徑與結果
-    train(args.arch, args.category, args.epochs, save_pth_path)
+# =======================
+# Run pipeline
+# =======================
+if __name__ == "__main__":
+    main()
