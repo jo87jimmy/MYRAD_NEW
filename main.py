@@ -330,19 +330,20 @@ def main():
                 # 將影像資料移動到指定裝置（GPU 或 CPU）
                 imgs = imgs.to(device)
                 # 使用教師模型提取特徵，並停用梯度計算以節省記憶體與加速推論
+                # --- 教師模型 forward（不計梯度） ---
                 with torch.no_grad():
-                    teacher_feats = get_embeddings(teacher_model, imgs)
+                    _, teacher_feats = teacher_model(imgs, return_feats=True)
 
                 # --- 學生模型 forward ---
-                recon_output, student_feats = student_model(imgs)  # 返回重建圖 + 特徵
+                recon_output, student_feats = student_model(imgs)
 
                 # --- 計算重建損失 ---
                 recon_loss = F.mse_loss(recon_output, imgs)
 
-                # --- 計算蒸餾損失 ---
+                # --- 計算特徵蒸餾損失 ---
                 distill_loss = rd4ad_loss(teacher_feats, student_feats)
 
-                # --- 總損失 ---
+                # --- 總 loss ---
                 loss = recon_loss + lambda_distill * distill_loss
 
                 # # 使用學生模型提取特徵
