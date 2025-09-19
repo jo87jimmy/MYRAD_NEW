@@ -391,7 +391,7 @@ def main():
 
     if Training:
         # 載入最佳模型進行推論
-        Best_model = ReconstructiveSubNetwork(in_channels=3, out_channels=3).to(device)
+        Best_model = StudentReconstructiveSubNetwork(in_channels=3, out_channels=3).to(device)
         # 載入 checkpoint
         ckpt_path = os.path.join(checkpoint_dir, "student_best.pth")
         checkpoint = torch.load(ckpt_path, map_location=device)
