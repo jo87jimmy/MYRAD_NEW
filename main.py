@@ -391,14 +391,16 @@ def main():
     if Training:
         # 載入最佳模型進行推論
         Best_model = ReconstructiveSubNetwork(in_channels=3, out_channels=3).to(device)
-        Best_model = Best_model.to(device)
-        ckpt = os.path.join(checkpoint_dir, f"student_best.pth")
-        ckpt_path = torch.load(ckpt, map_location=device)
-        # 載入模型權重
-        Best_model.load_state_dict(ckpt_path)
+        # 載入 checkpoint
+        ckpt_path = os.path.join(checkpoint_dir, "student_best.pth")
+        checkpoint = torch.load(ckpt_path, map_location=device)
+
+        # 只載入模型權重
+        Best_model.load_state_dict(checkpoint["student_state_dict"])
+
         # 設定為推論模式
         Best_model.eval()
-        detection_model = Best_model.eval()
+        detection_model = Best_model  # 直接指向 Best_model
     else:
         detection_model = teacher_model.eval()
     # 停用梯度計算，加速推論並節省記憶體
