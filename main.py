@@ -296,7 +296,7 @@ def main():
     epochs = args.epochs
     # 初始化全域步數計數器，用於 TensorBoard 記錄
     global_step = 0
-
+    torch.cuda.empty_cache()
     # 開始進行多輪訓練迴圈
     for epoch in range(epochs):
         # 將學生模型設為訓練模式，啟用 Dropout、BatchNorm 等訓練機制
@@ -351,6 +351,7 @@ def main():
             print(f"--> Saved best Student model to {ckpt_path}")
     # 關閉 TensorBoard 紀錄器，釋放資源
     writer.close()
+    torch.cuda.empty_cache()
 
     # --------------------------
     # Inference + visualization
