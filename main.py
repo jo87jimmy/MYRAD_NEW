@@ -417,7 +417,7 @@ def main():
             # anomaly = anomaly_map(imgs, teacher_model, detection_model)
 
             # Student (Autoencoder) 前向傳播：重建影像
-            recon_imgs = anomaly_map_student_recon(imgs)
+            recon_imgs = anomaly_map_student_recon(imgs,detection_model)
             # 計算像素級異常分數 (重建誤差)
             anomaly = torch.mean((imgs - recon_imgs) ** 2, dim=1, keepdim=True)
 
