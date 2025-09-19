@@ -339,7 +339,7 @@ def main():
     torch.cuda.empty_cache()
 
     # Training todo
-    Training = False
+    Training = True
 
     if Training:
         # 開始進行多輪訓練迴圈
