@@ -166,6 +166,43 @@ def anomaly_map(imgs, teacher_model, student_model):
     # 將所有層的異常分數圖堆疊後取平均，得到最終的異常圖
     return torch.mean(torch.stack(score_maps), dim=0)
 
+
+def anomaly_map_student(imgs, student_model):
+    with torch.no_grad():
+        # 取出 student 特徵
+        s_feats = get_embeddings(student_model, imgs)
+
+    score_maps = []
+    for s in s_feats:
+        # L2 正規化
+        s = nn.functional.normalize(s, dim=1)
+
+        # 每張圖的平均特徵向量 (normal baseline)
+        mean_feat = torch.mean(s, dim=(2, 3), keepdim=True)
+
+        # 異常分數：與平均特徵的相似度差異 (越不像越異常)
+        diff = 1 - torch.mean(s * mean_feat, dim=1, keepdim=True)
+
+        # 插值回原圖大小
+        diff = nn.functional.interpolate(diff, size=imgs.shape[2:], mode="bilinear")
+
+        score_maps.append(diff)
+
+    # 平均所有層的 anomaly map
+    return torch.mean(torch.stack(score_maps), dim=0)
+
+
+def anomaly_map_student_recon(imgs, student_model):
+    with torch.no_grad():
+        # Autoencoder 前向傳播：重建影像
+        recon_imgs = student_model(imgs)
+
+        # 計算重建誤差 (MSE)，當作 anomaly map
+        anomaly = torch.mean((imgs - recon_imgs) ** 2, dim=1, keepdim=True)
+
+        # anomaly map 形狀: (B, 1, H, W)
+        return anomaly
+
 # =======================
 # Evaluation
 # =======================
@@ -182,12 +219,15 @@ def evaluate(student_model, teacher_model, val_loader, device, writer=None, epoc
         for imgs, (img_labels, pixel_masks) in val_loader:
             # 將影像與像素遮罩移動到指定裝置（GPU 或 CPU）
             imgs, pixel_masks = imgs.to(device), pixel_masks.to(device)
+
             # 計算異常圖（anomaly map），比較教師與學生模型的特徵差異
             anomaly = anomaly_map(imgs, teacher_model, student_model)
+
             # 將異常圖轉為 NumPy 並展平，儲存像素級分數
             all_pixel_scores.append(anomaly.cpu().numpy().ravel())
             # 將像素遮罩轉為 NumPy 並展平，儲存像素級標籤
             all_pixel_labels.append(pixel_masks.cpu().numpy().ravel())
+
             # 將異常圖展平為 (batch_size, num_pixels)，取每張圖的最大異常分數作為影像級分數
             img_scores = anomaly.view(anomaly.size(0), -1).max(dim=1)[0]
             # 儲存影像級分數與標籤
@@ -297,60 +337,65 @@ def main():
     # 初始化全域步數計數器，用於 TensorBoard 記錄
     global_step = 0
     torch.cuda.empty_cache()
-    # 開始進行多輪訓練迴圈
-    for epoch in range(epochs):
-        # 將學生模型設為訓練模式，啟用 Dropout、BatchNorm 等訓練機制
-        student_model.train()
-        # 遍歷訓練資料集的每個批次
-        for imgs, _ in train_loader:
-            # 將影像資料移動到指定裝置（GPU 或 CPU）
-            imgs = imgs.to(device)
-            # 使用教師模型提取特徵，並停用梯度計算以節省記憶體與加速推論
-            with torch.no_grad():
-                teacher_feats = get_embeddings(teacher_model, imgs)
-            # 使用學生模型提取特徵
-            student_feats = get_embeddings(student_model, imgs)
-            # 計算教師與學生特徵之間的差異損失（Loss）
-            loss = rd4ad_loss(teacher_feats, student_feats)
-            # 清除先前的梯度
-            optimizer.zero_grad()
-            # 反向傳播計算梯度
-            loss.backward()
-            # 更新學生模型的參數
-            optimizer.step()
-            # 將訓練損失記錄到 TensorBoard，標記為 "Train/Loss"
-            writer.add_scalar("Train/Loss", loss.item(), global_step)
-            # 步數累加，用於追蹤訓練進度
-            global_step += 1
-        # 顯示目前 epoch 的訓練損失
-        print(f"Epoch [{epoch+1}/{epochs}] Train Loss: {loss.item():.4f}")
 
-        # Validation
-        # 執行驗證流程，計算像素級與影像級的 AUROC 指標
-        pixel_auroc, img_auroc = evaluate(student_model, teacher_model, val_loader, device, writer, epoch)
-        # 將驗證結果記錄到 TensorBoard
-        writer.add_scalar("Val/Pixel_AUROC", pixel_auroc, epoch)
-        writer.add_scalar("Val/Image_AUROC", img_auroc, epoch)
-        # 顯示驗證結果
-        print(f"Validation - Pixel AUROC: {pixel_auroc:.4f}, Image AUROC: {img_auroc:.4f}")
+    # Training todo
+    Training = False
 
-        # 若目前的像素級 AUROC 優於歷史最佳值，則儲存模型檢查點
-        if pixel_auroc > best_pixel_auroc:
-            # 更新最佳 AUROC 值
-            best_pixel_auroc = pixel_auroc
-            # 建立檢查點儲存路徑，包含 epoch 與 AUROC 指標
-            ckpt_path = os.path.join(checkpoint_dir, f"student_best_epoch{epoch+1}_pixelAUROC{pixel_auroc:.4f}.pth")
-            # 儲存模型狀態與優化器狀態到檔案
-            torch.save({
-                "epoch": epoch+1,
-                "pixel_auroc": pixel_auroc,
-                "img_auroc": img_auroc,
-                "student_state_dict": student_model.state_dict(),
-                "optimizer_state_dict": optimizer.state_dict()
-            }, ckpt_path)
-            print(f"--> Saved best Student model to {ckpt_path}")
-    # 關閉 TensorBoard 紀錄器，釋放資源
-    writer.close()
+    if Training:
+        # 開始進行多輪訓練迴圈
+        for epoch in range(epochs):
+            # 將學生模型設為訓練模式，啟用 Dropout、BatchNorm 等訓練機制
+            student_model.train()
+            # 遍歷訓練資料集的每個批次
+            for imgs, _ in train_loader:
+                # 將影像資料移動到指定裝置（GPU 或 CPU）
+                imgs = imgs.to(device)
+                # 使用教師模型提取特徵，並停用梯度計算以節省記憶體與加速推論
+                with torch.no_grad():
+                    teacher_feats = get_embeddings(teacher_model, imgs)
+                # 使用學生模型提取特徵
+                student_feats = get_embeddings(student_model, imgs)
+                # 計算教師與學生特徵之間的差異損失（Loss）
+                loss = rd4ad_loss(teacher_feats, student_feats)
+                # 清除先前的梯度
+                optimizer.zero_grad()
+                # 反向傳播計算梯度
+                loss.backward()
+                # 更新學生模型的參數
+                optimizer.step()
+                # 將訓練損失記錄到 TensorBoard，標記為 "Train/Loss"
+                writer.add_scalar("Train/Loss", loss.item(), global_step)
+                # 步數累加，用於追蹤訓練進度
+                global_step += 1
+            # 顯示目前 epoch 的訓練損失
+            print(f"Epoch [{epoch+1}/{epochs}] Train Loss: {loss.item():.4f}")
+
+            # Validation
+            # 執行驗證流程，計算像素級與影像級的 AUROC 指標
+            pixel_auroc, img_auroc = evaluate(student_model, teacher_model, val_loader, device, writer, epoch)
+            # 將驗證結果記錄到 TensorBoard
+            writer.add_scalar("Val/Pixel_AUROC", pixel_auroc, epoch)
+            writer.add_scalar("Val/Image_AUROC", img_auroc, epoch)
+            # 顯示驗證結果
+            print(f"Validation - Pixel AUROC: {pixel_auroc:.4f}, Image AUROC: {img_auroc:.4f}")
+
+            # 若目前的像素級 AUROC 優於歷史最佳值，則儲存模型檢查點
+            if pixel_auroc > best_pixel_auroc:
+                # 更新最佳 AUROC 值
+                best_pixel_auroc = pixel_auroc
+                # 建立檢查點儲存路徑，包含 epoch 與 AUROC 指標
+                ckpt_path = os.path.join(checkpoint_dir, f"student_best_epoch{epoch+1}_pixelAUROC{pixel_auroc:.4f}.pth")
+                # 儲存模型狀態與優化器狀態到檔案
+                torch.save({
+                    "epoch": epoch+1,
+                    "pixel_auroc": pixel_auroc,
+                    "img_auroc": img_auroc,
+                    "student_state_dict": student_model.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict()
+                }, ckpt_path)
+                print(f"--> Saved best Student model to {ckpt_path}")
+        # 關閉 TensorBoard 紀錄器，釋放資源
+        writer.close()
     torch.cuda.empty_cache()
 
     # --------------------------
@@ -361,19 +406,26 @@ def main():
     # 若資料夾不存在則建立，用來儲存推論圖像與報告
     os.makedirs(inference_results, exist_ok=True)
     # 將學生模型設為推論模式，停用 Dropout、BatchNorm 等訓練專用機制
-    student_model.eval()
+    detection_model = teacher_model.eval()#   student_model.eval() todo
     # 停用梯度計算，加速推論並節省記憶體
     with torch.no_grad():
         # 遍歷驗證資料集的每個批次
         for i, (imgs, (labels, masks)) in enumerate(val_loader):
             # 將影像與遮罩資料移動到指定裝置（GPU 或 CPU）
             imgs, masks = imgs.to(device), masks.to(device)
-            # 使用教師與學生模型計算異常圖（anomaly map）
-            anomaly = anomaly_map(imgs, teacher_model, student_model)
+            # 使用教師與學生模型計算異常圖（anomaly map）todo 因該是只有學生模型
+            # anomaly = anomaly_map(imgs, teacher_model, detection_model)
+
+            # Student (Autoencoder) 前向傳播：重建影像
+            recon_imgs = anomaly_map_student_recon(imgs)
+            # 計算像素級異常分數 (重建誤差)
+            anomaly = torch.mean((imgs - recon_imgs) ** 2, dim=1, keepdim=True)
+
             # 將異常圖正規化到 [0,1] 範圍，避免數值不穩定（加上 1e-8 防止除以 0）
             anomaly_norm = (anomaly - anomaly.min()) / (anomaly.max() - anomaly.min() + 1e-8)
             # 將單通道異常圖複製成 RGB 三通道格式，方便視覺化
             anomaly_rgb = anomaly_norm.repeat(1,3,1,1)
+
             # 將遮罩資料也複製成 RGB 三通道格式
             masks_rgb = masks.repeat(1,3,1,1)
             # 將原始影像、異常圖與遮罩圖沿著寬度方向拼接成一張比較圖
@@ -386,7 +438,7 @@ def main():
     # Full evaluation report
     # --------------------------
     # 執行模型評估，計算像素級與影像級的 AUROC 指標
-    pixel_auroc, img_auroc = evaluate(student_model, teacher_model, val_loader, device)
+    pixel_auroc, img_auroc = evaluate(detection_model, teacher_model, val_loader, device)
     # 設定報告儲存路徑為 inference_results/evaluation_report.txt
     report_path = os.path.join(inference_results, "evaluation_report.txt")
     # 將評估結果寫入報告檔案
