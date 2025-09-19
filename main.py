@@ -143,6 +143,34 @@ def rd4ad_loss(teacher_feats, student_feats):
     # 回傳所有層損失的總和，作為最終損失值
     return loss
 
+import torch
+import torch.nn.functional as F
+
+def rd4ad_loss2(teacher_feats, student_feats):
+    """
+    teacher_feats: 教師瓶頸特徵 tensor (B, C, H, W)
+    student_feats: 學生瓶頸特徵 tensor (B, C, H', W')
+    """
+    loss = 0.0
+
+    for t, s in zip(teacher_feats, student_feats):
+        # t, s shape: (B, C, H, W)
+        # 先對齊學生特徵尺寸到教師特徵
+        if t.size(2) != s.size(2) or t.size(3) != s.size(3):
+            s = F.interpolate(s, size=(t.size(2), t.size(3)), mode='bilinear', align_corners=False)
+
+        # 展平成 (B, C*H*W)
+        t_flat = t.view(t.size(0), -1)
+        s_flat = s.view(s.size(0), -1)
+
+        # 計算 cosine similarity loss
+        cos = F.cosine_similarity(t_flat, s_flat, dim=1)
+        loss += torch.mean(1 - cos)
+
+    # 平均所有批次
+    loss = loss / len(teacher_feats)
+    return loss
+
 # 定義 anomaly_map 函式，用來產生異常分數圖（score map），比較教師與學生模型的特徵差異
 def anomaly_map(imgs, teacher_model, student_model):
     # 停用梯度計算，加速推論並節省記憶體
@@ -289,7 +317,7 @@ def main():
 
     # Student model
     #dropout 防止過擬合，幫助學生模型泛化，避免過擬合教師模型提取的特徵。在蒸餾訓練時，讓學生模型學到更穩健的特徵，而不是完全模仿教師模型的單一路徑
-    student_model = StudentReconstructiveSubNetwork(in_channels=3, out_channels=3,base_width=128,dropout_rate=0.2).to(device)
+    student_model = StudentReconstructiveSubNetwork(in_channels=3, out_channels=3,base_width=64,dropout_rate=0.2).to(device)
     #定義學生模型優化器和學習率排程器
     optimizer = optim.Adam(student_model.parameters(), lr=1e-4)
 
@@ -334,7 +362,7 @@ def main():
                 # 使用學生模型提取特徵
                 student_feats = get_embeddings(student_model, imgs)
                 # 計算教師與學生特徵之間的差異損失（Loss）
-                loss = rd4ad_loss(teacher_feats, student_feats)
+                loss = rd4ad_loss2(teacher_feats, student_feats)
                 # 清除先前的梯度
                 optimizer.zero_grad()
                 # 反向傳播計算梯度
@@ -397,7 +425,7 @@ def main():
         Best_model = StudentReconstructiveSubNetwork(
             in_channels=3,
             out_channels=3,
-            base_width=128,      # 與訓練一致
+            base_width=64,      # 與訓練一致
             dropout_rate=0.2    # 與訓練一致
         ).to(device)
         # 載入 checkpoint
