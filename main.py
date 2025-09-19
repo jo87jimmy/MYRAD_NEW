@@ -252,6 +252,7 @@ def main():
     parser.add_argument('--arch', default='wres50', type=str)  # 模型架構
     parser.add_argument('--bs', action='store', type=int, required=True)
     parser.add_argument('--lr', action='store', type=float, required=True)
+    parser.add_argument('--train_bool', action='True', type=float, required=True)
     args = parser.parse_args()
 
     setup_seed(111)  # 固定隨機種子
@@ -312,8 +313,7 @@ def main():
     global_step = 0
     torch.cuda.empty_cache()
 
-    # Training todo
-    Training = True
+    Training = args.train_bool
 
     if Training:
         # 開始進行多輪訓練迴圈
@@ -368,6 +368,14 @@ def main():
                     "optimizer_state_dict": optimizer.state_dict()
                 }, ckpt_path)
                 print(f"--> Saved best Student model to {ckpt_path}")
+                # 建立Best模型的固定檔名
+                ckpt_path_best = os.path.join(checkpoint_dir, f"student_best.pth")
+                # 儲存模型狀態與優化器狀態到檔案
+                torch.save({
+                    "student_state_dict": student_model.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict()
+                }, ckpt_path_best)
+                print(f"--> Saved best  model to {ckpt_path_best}")
         # 關閉 TensorBoard 紀錄器，釋放資源
         writer.close()
     torch.cuda.empty_cache()
@@ -379,8 +387,20 @@ def main():
     inference_results = os.path.join(save_root, "inference_results")
     # 若資料夾不存在則建立，用來儲存推論圖像與報告
     os.makedirs(inference_results, exist_ok=True)
-    # 將學生模型設為推論模式，停用 Dropout、BatchNorm 等訓練專用機制
-    detection_model = student_model.eval() # teacher_model.eval()   todo
+
+    if Training:
+        # 載入最佳模型進行推論
+        Best_model = ReconstructiveSubNetwork(in_channels=3, out_channels=3).to(device)
+        Best_model = Best_model.to(device)
+        ckpt = os.path.join(checkpoint_dir, f"student_best.pth")
+        ckpt_path = torch.load(ckpt, map_location=device)
+        # 載入模型權重
+        Best_model.load_state_dict(ckpt_path)
+        # 設定為推論模式
+        Best_model.eval()
+        detection_model = Best_model.eval()
+    else:
+        detection_model = teacher_model.eval()
     # 停用梯度計算，加速推論並節省記憶體
     with torch.no_grad():
         # 遍歷驗證資料集的每個批次
