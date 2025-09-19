@@ -173,7 +173,7 @@ def anomaly_map(imgs, teacher_model, student_model):
 def anomaly_map_student_recon(imgs, student_model):
     with torch.no_grad():
         # Autoencoder 前向傳播：重建影像
-        recon_imgs = student_model(imgs)
+        recon_imgs, _ = student_model(imgs)# 只取重建圖
 
         # 計算重建誤差 (MSE)，當作 anomaly map
         anomaly = torch.mean((imgs - recon_imgs) ** 2, dim=1, keepdim=True)
