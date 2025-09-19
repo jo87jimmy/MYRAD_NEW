@@ -252,7 +252,7 @@ def main():
     parser.add_argument('--arch', default='wres50', type=str)  # 模型架構
     parser.add_argument('--bs', action='store', type=int, required=True)
     parser.add_argument('--lr', action='store', type=float, required=True)
-    parser.add_argument('--train_bool', action='True', type=float, required=True)
+    parser.add_argument('--train_bool', action='store_true', help='是否進行訓練')
     args = parser.parse_args()
 
     setup_seed(111)  # 固定隨機種子
