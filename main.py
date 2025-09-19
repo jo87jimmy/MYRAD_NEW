@@ -11,6 +11,7 @@ from sklearn.metrics import roc_auc_score
 from torch.utils.tensorboard import SummaryWriter
 import random  # 亂數控制
 import argparse  # 命令列參數處理
+import torch.nn.functional as F
 
 from model_unet import ReconstructiveSubNetwork,StudentReconstructiveSubNetwork  # 你的 DRAEM 模型
 
@@ -141,34 +142,6 @@ def rd4ad_loss(teacher_feats, student_feats):
         # torch.mean 表示對整個 batch 取平均，作為該層的損失
         loss += torch.mean(1 - cos(t, s))
     # 回傳所有層損失的總和，作為最終損失值
-    return loss
-
-import torch
-import torch.nn.functional as F
-
-def rd4ad_loss2(teacher_feats, student_feats):
-    """
-    teacher_feats: 教師瓶頸特徵 tensor (B, C, H, W)
-    student_feats: 學生瓶頸特徵 tensor (B, C, H', W')
-    """
-    loss = 0.0
-
-    for t, s in zip(teacher_feats, student_feats):
-        # t, s shape: (B, C, H, W)
-        # 先對齊學生特徵尺寸到教師特徵
-        if t.size(2) != s.size(2) or t.size(3) != s.size(3):
-            s = F.interpolate(s, size=(t.size(2), t.size(3)), mode='bilinear', align_corners=False)
-
-        # 展平成 (B, C*H*W)
-        t_flat = t.view(t.size(0), -1)
-        s_flat = s.view(s.size(0), -1)
-
-        # 計算 cosine similarity loss
-        cos = F.cosine_similarity(t_flat, s_flat, dim=1)
-        loss += torch.mean(1 - cos)
-
-    # 平均所有批次
-    loss = loss / len(teacher_feats)
     return loss
 
 # 定義 anomaly_map 函式，用來產生異常分數圖（score map），比較教師與學生模型的特徵差異
@@ -346,7 +319,7 @@ def main():
     torch.cuda.empty_cache()
 
     Training = args.train_bool
-
+    lambda_distill = 1.0  # 蒸餾 loss 權重，可依需求調整
     if Training:
         # 開始進行多輪訓練迴圈
         for epoch in range(epochs):
@@ -359,10 +332,25 @@ def main():
                 # 使用教師模型提取特徵，並停用梯度計算以節省記憶體與加速推論
                 with torch.no_grad():
                     teacher_feats = get_embeddings(teacher_model, imgs)
-                # 使用學生模型提取特徵
-                student_feats = get_embeddings(student_model, imgs)
-                # 計算教師與學生特徵之間的差異損失（Loss）
-                loss = rd4ad_loss2(teacher_feats, student_feats)
+
+                # --- 學生模型 forward ---
+                recon_output, student_feats = student_model(imgs)  # 返回重建圖 + 特徵
+
+                # --- 計算重建損失 ---
+                recon_loss = F.mse_loss(recon_output, imgs)
+
+                # --- 計算蒸餾損失 ---
+                distill_loss = rd4ad_loss(teacher_feats, student_feats)
+
+                # --- 總損失 ---
+                loss = recon_loss + lambda_distill * distill_loss
+                
+                # # 使用學生模型提取特徵
+                # student_feats = get_embeddings(student_model, imgs)
+                # # 計算教師與學生特徵之間的差異損失（Loss）
+                # loss = rd4ad_loss(teacher_feats, student_feats)
+
+
                 # 清除先前的梯度
                 optimizer.zero_grad()
                 # 反向傳播計算梯度
