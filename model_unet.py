@@ -15,6 +15,85 @@ class ReconstructiveSubNetwork(nn.Module):
         output = self.decoder(b5)
         return output
 
+class StudentReconstructiveSubNetwork(nn.Module):
+    """
+    輕量化重建子網路 (學生模型)
+    類似 U-Net 的結構，但通道數減半並加入 Dropout
+    """
+
+    def __init__(self, in_channels=3, out_channels=3, base_width=64, dropout_rate=0.2):
+        super(StudentReconstructiveSubNetwork, self).__init__()
+        self.dropout_rate = dropout_rate
+
+        # --- 編碼器 ---
+        self.encoder1 = self._make_conv_block(in_channels, base_width, dropout_rate)
+        self.encoder2 = self._make_conv_block(base_width, base_width*2, dropout_rate)
+        self.encoder3 = self._make_conv_block(base_width*2, base_width*4, dropout_rate)
+        self.encoder4 = self._make_conv_block(base_width*4, base_width*8, dropout_rate)
+        self.pool = nn.MaxPool2d(2, 2)
+
+        # --- 瓶頸層 ---
+        self.bottleneck = self._make_conv_block(base_width*8, base_width*16, dropout_rate)
+
+        # --- 解碼器 ---
+        self.upsample = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
+        self.decoder4 = self._make_conv_block(base_width*16 + base_width*8, base_width*8, dropout_rate)
+        self.decoder3 = self._make_conv_block(base_width*8 + base_width*4, base_width*4, dropout_rate)
+        self.decoder2 = self._make_conv_block(base_width*4 + base_width*2, base_width*2, dropout_rate)
+        self.decoder1 = self._make_conv_block(base_width*2 + base_width, base_width, dropout_rate)
+
+        # --- 輸出層 ---
+        self.output_conv = nn.Conv2d(base_width, out_channels, kernel_size=1)
+
+    def _make_conv_block(self, in_ch, out_ch, dropout_rate):
+        """Conv -> BatchNorm -> ReLU -> Dropout -> Conv -> BatchNorm -> ReLU -> Dropout"""
+        layers = [
+            nn.Conv2d(in_ch, out_ch, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(out_ch),
+            nn.ReLU(inplace=True)
+        ]
+        if dropout_rate > 0:
+            layers.append(nn.Dropout2d(dropout_rate))
+
+        layers += [
+            nn.Conv2d(out_ch, out_ch, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(out_ch),
+            nn.ReLU(inplace=True)
+        ]
+        if dropout_rate > 0:
+            layers.append(nn.Dropout2d(dropout_rate))
+
+        return nn.Sequential(*layers)
+
+    def forward(self, x):
+        # --- 編碼器 ---
+        e1 = self.encoder1(x)
+        e2 = self.encoder2(self.pool(e1))
+        e3 = self.encoder3(self.pool(e2))
+        e4 = self.encoder4(self.pool(e3))
+
+        # --- 瓶頸 ---
+        b = self.bottleneck(self.pool(e4))
+
+        # --- 解碼器 ---
+        d4 = self.upsample(b)
+        d4 = torch.cat([d4, e4], dim=1)
+        d4 = self.decoder4(d4)
+
+        d3 = self.upsample(d4)
+        d3 = torch.cat([d3, e3], dim=1)
+        d3 = self.decoder3(d3)
+
+        d2 = self.upsample(d3)
+        d2 = torch.cat([d2, e2], dim=1)
+        d2 = self.decoder2(d2)
+
+        d1 = self.upsample(d2)
+        d1 = torch.cat([d1, e1], dim=1)
+        d1 = self.decoder1(d1)
+
+        out = self.output_conv(d1)
+        return out
 
 class DiscriminativeSubNetwork(nn.Module):
 

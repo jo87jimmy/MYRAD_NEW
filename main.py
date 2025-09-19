@@ -12,7 +12,7 @@ from torch.utils.tensorboard import SummaryWriter
 import random  # 亂數控制
 import argparse  # 命令列參數處理
 
-from model_unet import ReconstructiveSubNetwork  # 你的 DRAEM 模型
+from model_unet import ReconstructiveSubNetwork,StudentReconstructiveSubNetwork  # 你的 DRAEM 模型
 
 def setup_seed(seed):
     # 設定隨機種子，確保實驗可重現
@@ -285,7 +285,8 @@ def main():
         p.requires_grad = False
 
     # Student model
-    student_model = ReconstructiveSubNetwork(in_channels=3, out_channels=3).to(device)
+    #dropout 防止過擬合，幫助學生模型泛化，避免過擬合教師模型提取的特徵。在蒸餾訓練時，讓學生模型學到更穩健的特徵，而不是完全模仿教師模型的單一路徑
+    student_model = StudentReconstructiveSubNetwork(in_channels=3, out_channels=3,base_width=64,dropout_rate=0.2).to(device)
     #定義學生模型優化器和學習率排程器
     optimizer = optim.Adam(student_model.parameters(), lr=1e-4)
 
@@ -401,8 +402,10 @@ def main():
         # 設定為推論模式
         Best_model.eval()
         detection_model = Best_model  # 直接指向 Best_model
+        print(f"Training done. Loaded best model from {ckpt_path} for inference.")
     else:
         detection_model = teacher_model.eval()
+        print(f"No training. Using teacher model for inference.")
     # 停用梯度計算，加速推論並節省記憶體
     with torch.no_grad():
         # 遍歷驗證資料集的每個批次
