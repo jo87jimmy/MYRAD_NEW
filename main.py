@@ -166,32 +166,6 @@ def anomaly_map(imgs, teacher_model, student_model):
     # 將所有層的異常分數圖堆疊後取平均，得到最終的異常圖
     return torch.mean(torch.stack(score_maps), dim=0)
 
-
-def anomaly_map_student(imgs, student_model):
-    with torch.no_grad():
-        # 取出 student 特徵
-        s_feats = get_embeddings(student_model, imgs)
-
-    score_maps = []
-    for s in s_feats:
-        # L2 正規化
-        s = nn.functional.normalize(s, dim=1)
-
-        # 每張圖的平均特徵向量 (normal baseline)
-        mean_feat = torch.mean(s, dim=(2, 3), keepdim=True)
-
-        # 異常分數：與平均特徵的相似度差異 (越不像越異常)
-        diff = 1 - torch.mean(s * mean_feat, dim=1, keepdim=True)
-
-        # 插值回原圖大小
-        diff = nn.functional.interpolate(diff, size=imgs.shape[2:], mode="bilinear")
-
-        score_maps.append(diff)
-
-    # 平均所有層的 anomaly map
-    return torch.mean(torch.stack(score_maps), dim=0)
-
-
 def anomaly_map_student_recon(imgs, student_model):
     with torch.no_grad():
         # Autoencoder 前向傳播：重建影像
@@ -339,7 +313,7 @@ def main():
     torch.cuda.empty_cache()
 
     # Training todo
-    Training = False
+    Training = True
 
     if Training:
         # 開始進行多輪訓練迴圈
@@ -406,7 +380,7 @@ def main():
     # 若資料夾不存在則建立，用來儲存推論圖像與報告
     os.makedirs(inference_results, exist_ok=True)
     # 將學生模型設為推論模式，停用 Dropout、BatchNorm 等訓練專用機制
-    detection_model = teacher_model.eval() #student_model.eval()    todo
+    detection_model = student_model.eval() # teacher_model.eval()   todo
     # 停用梯度計算，加速推論並節省記憶體
     with torch.no_grad():
         # 遍歷驗證資料集的每個批次
