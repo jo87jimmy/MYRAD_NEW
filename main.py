@@ -339,7 +339,7 @@ def main():
     torch.cuda.empty_cache()
 
     # Training todo
-    Training = True
+    Training = False
 
     if Training:
         # 開始進行多輪訓練迴圈
@@ -406,7 +406,7 @@ def main():
     # 若資料夾不存在則建立，用來儲存推論圖像與報告
     os.makedirs(inference_results, exist_ok=True)
     # 將學生模型設為推論模式，停用 Dropout、BatchNorm 等訓練專用機制
-    detection_model = student_model.eval() #teacher_model.eval()    todo
+    detection_model = teacher_model.eval() #student_model.eval()    todo
     # 停用梯度計算，加速推論並節省記憶體
     with torch.no_grad():
         # 遍歷驗證資料集的每個批次
