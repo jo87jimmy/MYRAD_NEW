@@ -12,6 +12,7 @@ from torch.utils.tensorboard import SummaryWriter
 import random  # 亂數控制
 import argparse  # 命令列參數處理
 import torch.nn.functional as F
+from sklearn.metrics import roc_auc_score
 
 from model_unet import ReconstructiveSubNetwork,StudentReconstructiveSubNetwork  # 你的 DRAEM 模型
 
@@ -213,7 +214,9 @@ def evaluate(student_model, teacher_model, val_loader, device, writer=None, epoc
 
             # 計算異常圖（anomaly map），比較教師與學生模型的特徵差異 todo
             anomaly = anomaly_map2(imgs, teacher_model, student_model)
-
+            # 上採樣 anomaly 到 pixel_masks 大小 (確保對齊)
+            anomaly = F.interpolate(anomaly, size=pixel_masks.shape[-2:], 
+                                    mode="bilinear", align_corners=False)
             # 將異常圖轉為 NumPy 並展平，儲存像素級分數
             # flatten，保證長度一致
             all_pixel_scores.append(anomaly.cpu().numpy().ravel())
@@ -250,6 +253,13 @@ def evaluate(student_model, teacher_model, val_loader, device, writer=None, epoc
     # 將所有批次的影像級分數與標籤合併為一個大陣列
     all_img_scores = np.concatenate(all_img_scores)
     all_img_labels = np.concatenate(all_img_labels)
+
+    # --- 安全檢查 ---
+    assert all_pixel_scores.shape == all_pixel_labels.shape, \
+        f"Shape mismatch: scores={all_pixel_scores.shape}, labels={all_pixel_labels.shape}"
+    assert all_img_scores.shape == all_img_labels.shape, \
+        f"Shape mismatch: scores={all_img_scores.shape}, labels={all_img_labels.shape}"
+    
     # 計算像素級 AUROC（Area Under ROC Curve）
     pixel_auroc = roc_auc_score(all_pixel_labels, all_pixel_scores)
     # 計算影像級 AUROC
