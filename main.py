@@ -100,32 +100,6 @@ class MVTecDataset(torch.utils.data.Dataset):
 # =======================
 # Utilities
 # =======================
-# 定義函式 get_embeddings，用來從模型中提取中間層的特徵圖（feature maps）
-def get_embeddings(model, x):
-    # 初始化特徵儲存清單 feats，以及 hook 物件清單 hooks
-    feats, hooks = [], []
-
-    # 定義 forward hook 函式，當層執行 forward 時會將輸出結果加入 feats 清單
-    def hook_fn(_, __, output):
-        feats.append(output)
-
-    # 遍歷模型中的所有模組（module）
-    for layer in model.modules():
-        # 若模組是卷積層（Conv2d），則註冊 forward hook
-        if isinstance(layer, nn.Conv2d):
-            hooks.append(layer.register_forward_hook(hook_fn))
-
-    # 執行模型 forward，觸發所有已註冊的 hook，並將特徵儲存到 feats
-    _ = model(x)
-
-    # 移除所有 hook，避免重複註冊或記憶體洩漏
-    for h in hooks: h.remove()
-
-    # 回傳所有提取到的特徵圖
-    return feats
-
-
-
 
 # 建立餘弦相似度計算器，指定比較維度為通道維度（dim=1）
 cos = nn.CosineSimilarity(dim=1)
@@ -145,32 +119,6 @@ def rd4ad_loss(teacher_feats, student_feats):
     # 回傳所有層損失的總和，作為最終損失值
     return loss
 
-# 定義 anomaly_map 函式，用來產生異常分數圖（score map），比較教師與學生模型的特徵差異
-def anomaly_map(imgs, teacher_model, student_model):
-    # 停用梯度計算，加速推論並節省記憶體
-    with torch.no_grad():
-        # 從教師模型提取特徵圖（feature maps）
-        t_feats = get_embeddings(teacher_model, imgs)
-        # 從學生模型提取特徵圖
-        s_feats = get_embeddings(student_model, imgs)
-    # 初始化異常分數圖的儲存清單
-    score_maps = []
-    # 同時遍歷教師與學生模型的每層特徵圖
-    for t,s in zip(t_feats, s_feats):
-        # 對教師特徵圖進行 L2 正規化，沿著通道維度（dim=1）
-        t = nn.functional.normalize(t, dim=1)
-        # 對學生特徵圖進行 L2 正規化
-        s = nn.functional.normalize(s, dim=1)
-        # 計算教師與學生特徵的相似度（內積），並取平均後轉換為異常分數（1 - 相似度）
-        # keepdim=True 保留通道維度，方便後續插值與拼接
-        diff = 1 - torch.mean(t*s, dim=1, keepdim=True)
-        # 將異常分數圖插值回原始影像大小，使用雙線性插值（bilinear）
-        diff = nn.functional.interpolate(diff, size=imgs.shape[2:], mode="bilinear")
-        # 將該層的異常分數圖加入清單
-        score_maps.append(diff)
-    # 將所有層的異常分數圖堆疊後取平均，得到最終的異常圖
-    return torch.mean(torch.stack(score_maps), dim=0)
-
 def anomaly_map_student_recon(imgs, student_model):
     with torch.no_grad():
         # Autoencoder 前向傳播：重建影像
@@ -182,7 +130,7 @@ def anomaly_map_student_recon(imgs, student_model):
         # anomaly map 形狀: (B, 1, H, W)
         return anomaly
 
-def anomaly_map2(imgs, teacher_model, student_model):
+def anomaly_map(imgs, teacher_model, student_model):
     with torch.no_grad():
         # 教師特徵
         t_feats = teacher_model.encoder(imgs)
@@ -213,7 +161,7 @@ def evaluate(student_model, teacher_model, val_loader, device, writer=None, epoc
             imgs, pixel_masks = imgs.to(device), pixel_masks.to(device)
 
             # 計算異常圖（anomaly map），比較教師與學生模型的特徵差異 todo
-            anomaly = anomaly_map2(imgs, teacher_model, student_model)
+            anomaly = anomaly_map(imgs, teacher_model, student_model)
             # 上採樣 anomaly 到 pixel_masks 大小 (確保對齊)
             anomaly = F.interpolate(anomaly, size=pixel_masks.shape[-2:], 
                                     mode="bilinear", align_corners=False)
@@ -234,7 +182,7 @@ def evaluate(student_model, teacher_model, val_loader, device, writer=None, epoc
             # 將影像移動到指定裝置
             val_imgs_vis = val_imgs_vis.to(device)
             # 計算該批次的異常圖
-            anomaly_vis = anomaly_map2(val_imgs_vis, teacher_model, student_model)
+            anomaly_vis = anomaly_map(val_imgs_vis, teacher_model, student_model)
             # 將異常圖正規化到 [0,1] 範圍，避免數值不穩定
             anomaly_norm = (anomaly_vis - anomaly_vis.min()) / (anomaly_vis.max() - anomaly_vis.min() + 1e-8)
             # 建立原始影像的網格圖（前 4 張）
@@ -372,12 +320,6 @@ def main():
 
                 # --- 總 loss ---
                 loss = recon_loss + lambda_distill * distill_loss
-
-                # # 使用學生模型提取特徵
-                # student_feats = get_embeddings(student_model, imgs)
-                # # 計算教師與學生特徵之間的差異損失（Loss）
-                # loss = rd4ad_loss(teacher_feats, student_feats)
-
 
                 # 清除先前的梯度
                 optimizer.zero_grad()
