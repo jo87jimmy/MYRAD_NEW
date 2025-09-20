@@ -397,9 +397,10 @@ def main():
                 #     "student_state_dict": student_model.state_dict(),
                 #     "optimizer_state_dict": optimizer.state_dict()
                 # }, ckpt_path_best)
-                
-                #只存模型權重
+
+                #只存模型權重，不存優化器，缺點是無法無縫接續訓練
                 torch.save(student_model.state_dict(), ckpt_path_best)
+
                 print(f"--> Saved best  model to {ckpt_path_best}")
         # 關閉 TensorBoard 紀錄器，釋放資源
         writer.close()
