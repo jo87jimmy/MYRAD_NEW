@@ -232,7 +232,7 @@ def evaluate(student_model, teacher_model, val_loader, device, writer=None, epoc
             # 將影像移動到指定裝置
             val_imgs_vis = val_imgs_vis.to(device)
             # 計算該批次的異常圖
-            anomaly_vis = anomaly_map(val_imgs_vis, teacher_model, student_model)
+            anomaly_vis = anomaly_map2(val_imgs_vis, teacher_model, student_model)
             # 將異常圖正規化到 [0,1] 範圍，避免數值不穩定
             anomaly_norm = (anomaly_vis - anomaly_vis.min()) / (anomaly_vis.max() - anomaly_vis.min() + 1e-8)
             # 建立原始影像的網格圖（前 4 張）
