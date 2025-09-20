@@ -215,15 +215,14 @@ def evaluate(student_model, teacher_model, val_loader, device, writer=None, epoc
             anomaly = anomaly_map2(imgs, teacher_model, student_model)
 
             # 將異常圖轉為 NumPy 並展平，儲存像素級分數
+            # flatten，保證長度一致
             all_pixel_scores.append(anomaly.cpu().numpy().ravel())
-            # 將像素遮罩轉為 NumPy 並展平，儲存像素級標籤
-            all_pixel_labels.append(pixel_masks.cpu().numpy().ravel())
+            all_pixel_labels.append(pixel_masks.squeeze(1).cpu().numpy().ravel())
 
-            # 將異常圖展平為 (batch_size, num_pixels)，取每張圖的最大異常分數作為影像級分數
+            # --- Image-level ---
             img_scores = anomaly.view(anomaly.size(0), -1).max(dim=1)[0]
-            # 儲存影像級分數與標籤
-            all_img_scores.append(img_scores.cpu().numpy())
-            all_img_labels.append(img_labels.numpy())
+            all_img_scores.append(img_scores.cpu().numpy().ravel())
+            all_img_labels.append(img_labels.cpu().numpy().ravel())
 
         # 若有提供 TensorBoard writer 且指定 epoch，則進行前 4 張影像的可視化
         if writer is not None and epoch is not None:
