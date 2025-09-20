@@ -393,8 +393,8 @@ def main():
                 ckpt_path_best = os.path.join(checkpoint_dir, f"student_best.pth")
                 # 儲存模型狀態與優化器狀態到檔案
                 torch.save({
-                    "student_state_dict": student_model.state_dict(),
-                    "optimizer_state_dict": optimizer.state_dict()
+                    "student_state_dict": student_model.state_dict()
+                    # "optimizer_state_dict": optimizer.state_dict()
                 }, ckpt_path_best)
                 print(f"--> Saved best  model to {ckpt_path_best}")
         # 關閉 TensorBoard 紀錄器，釋放資源
@@ -420,7 +420,8 @@ def main():
         checkpoint = torch.load(ckpt_path, map_location=device)
 
         # 只載入模型權重
-        Best_model.load_state_dict(checkpoint["student_state_dict"])
+        # Best_model.load_state_dict(checkpoint["student_state_dict"])
+        Best_model.load_state_dict(checkpoint)
 
         # 設定為推論模式
         Best_model.eval()
