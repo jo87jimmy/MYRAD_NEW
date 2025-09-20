@@ -391,11 +391,15 @@ def main():
                 print(f"--> Saved best Student model to {ckpt_path}")
                 # 建立Best模型的固定檔名
                 ckpt_path_best = os.path.join(checkpoint_dir, f"student_best.pth")
+
                 # 儲存模型狀態與優化器狀態到檔案
-                torch.save({
-                    "student_state_dict": student_model.state_dict()
-                    # "optimizer_state_dict": optimizer.state_dict()
-                }, ckpt_path_best)
+                # torch.save({
+                #     "student_state_dict": student_model.state_dict(),
+                #     "optimizer_state_dict": optimizer.state_dict()
+                # }, ckpt_path_best)
+                
+                #只存模型權重
+                torch.save(student_model.state_dict(), ckpt_path_best)
                 print(f"--> Saved best  model to {ckpt_path_best}")
         # 關閉 TensorBoard 紀錄器，釋放資源
         writer.close()
