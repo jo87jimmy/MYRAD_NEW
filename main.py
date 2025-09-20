@@ -181,6 +181,19 @@ def anomaly_map_student_recon(imgs, student_model):
         # anomaly map 形狀: (B, 1, H, W)
         return anomaly
 
+def anomaly_map2(imgs, teacher_model, student_model):
+    with torch.no_grad():
+        # 教師特徵
+        t_feats = teacher_model.encoder(imgs)
+
+        # 學生輸出
+        s_output, aligned_feats = student_model(imgs)
+
+        # 用對齊後的特徵跟老師比
+        diff = 1 - torch.mean(t_feats * aligned_feats, dim=1, keepdim=True)
+
+        return diff
+
 # =======================
 # Evaluation
 # =======================
@@ -198,8 +211,8 @@ def evaluate(student_model, teacher_model, val_loader, device, writer=None, epoc
             # 將影像與像素遮罩移動到指定裝置（GPU 或 CPU）
             imgs, pixel_masks = imgs.to(device), pixel_masks.to(device)
 
-            # 計算異常圖（anomaly map），比較教師與學生模型的特徵差異
-            anomaly = anomaly_map(imgs, teacher_model, student_model)
+            # 計算異常圖（anomaly map），比較教師與學生模型的特徵差異 todo
+            anomaly = anomaly_map2(imgs, teacher_model, student_model)
 
             # 將異常圖轉為 NumPy 並展平，儲存像素級分數
             all_pixel_scores.append(anomaly.cpu().numpy().ravel())
