@@ -290,7 +290,12 @@ def main():
 
     # Student model
     #dropout 防止過擬合，幫助學生模型泛化，避免過擬合教師模型提取的特徵。在蒸餾訓練時，讓學生模型學到更穩健的特徵，而不是完全模仿教師模型的單一路徑
-    student_model = StudentReconstructiveSubNetwork(in_channels=3, out_channels=3).to(device)
+    student_model = StudentReconstructiveSubNetwork(
+        in_channels=3,
+        out_channels=3,
+        base_width=64,# 壓縮後的維度
+        teacher_base_width=128# 教師模型的維度
+    ).to(device)
     #定義學生模型優化器和學習率排程器
     optimizer = optim.Adam(student_model.parameters(), lr=1e-4)
 
@@ -418,7 +423,9 @@ def main():
         # 載入最佳模型進行推論
         Best_model = StudentReconstructiveSubNetwork(
             in_channels=3,
-            out_channels=3
+            out_channels=3,
+            base_width=64,# 壓縮後的維度
+            teacher_base_width=128# 教師模型的維度
         ).to(device)
         # 載入 checkpoint
         ckpt_path = os.path.join(checkpoint_dir, "student_best.pth")
